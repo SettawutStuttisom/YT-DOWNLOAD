@@ -1,74 +1,135 @@
 import streamlit as st
 import yt_dlp
 import os
-from concurrent.futures import ThreadPoolExecutor
+import zipfile
+import shutil
+import imageio_ffmpeg
 
-st.set_page_config(page_title="YouTube Downloader", layout="centered")
-st.title("📥 YouTube Multi Downloader")
+st.set_page_config(page_title="YouTube Playlist Downloader", layout="centered")
+st.title("📥 YouTube Playlist → ZIP")
 
-urls_input = st.text_area("วางลิงก์ YouTube (1 บรรทัดต่อ 1 ลิงก์)")
+playlist_url = st.text_input("วางลิงก์ Playlist YouTube")
+
+download_type = st.radio(
+    "เลือกประเภทไฟล์",
+    ["🎬 วิดีโอ (MP4)", "🎵 เสียง (MP3)"]
+)
 
 quality = st.selectbox(
-    "เลือกความละเอียด",
+    "เลือกความละเอียด (เฉพาะวิดีโอ)",
     ["best", "1080p", "720p", "480p"]
 )
 
 download_path = "downloads"
-os.makedirs(download_path, exist_ok=True)
 
-def download_video(url):
-    try:
-        url = url.strip()
-        if not url:
-            return None, None
+# 🔥 ล้างโฟลเดอร์ก่อนโหลดใหม่
+def clear_folder(path):
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.makedirs(path)
 
-        if quality == "best":
-            fmt = "best"
-        else:
-            fmt = f"bestvideo[height<={quality[:-1]}]+bestaudio/best"
+if st.button("🚀 ดาวน์โหลดและสร้าง ZIP"):
 
-        filename_template = f'{download_path}/%(title).80s_%(id)s.%(ext)s'
-
-        ydl_opts = {
-            'format': fmt,
-            'outtmpl': filename_template,
-            'quiet': True,
-            'noplaylist': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-
-        return url, filename
-
-    except Exception as e:
-        return url, str(e)
-
-if st.button("🚀 เริ่มดาวน์โหลด"):
-    if urls_input.strip() == "":
-        st.warning("กรุณาใส่ลิงก์ก่อน")
+    if playlist_url.strip() == "":
+        st.warning("กรุณาใส่ลิงก์ Playlist")
     else:
-        urls = urls_input.split("\n")
-        st.info("กำลังดาวน์โหลด...")
+        clear_folder(download_path)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(download_video, url) for url in urls]
+        progress = st.progress(0)
+        status = st.empty()
 
-            for future in futures:
-                url, result = future.result()
+        # 🔥 progress
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                status.text("📥 กำลังดาวน์โหลด...")
+                progress.progress(50)
+            elif d['status'] == 'finished':
+                progress.progress(80)
 
-                if result and os.path.exists(result):
-                    st.success(f"✅ โหลดเสร็จ: {url}")
+        try:
+            # =========================
+            # 🎬 VIDEO MODE
+            # =========================
+            if download_type == "🎬 วิดีโอ (MP4)":
 
-                    with open(result, "rb") as f:
-                        st.download_button(
-                            label="📥 ดาวน์โหลดไฟล์",
-                            data=f,
-                            file_name=os.path.basename(result),
-                            mime="video/mp4"
-                        )
+                if quality == "best":
+                    fmt = "best"
                 else:
-                    st.error(f"❌ ล้มเหลว: {url} | {result}")
+                    fmt = f"bestvideo[height<={quality[:-1]}]+bestaudio/best"
 
-        st.success("เสร็จทั้งหมด!")
+                ydl_opts = {
+                    'format': fmt,
+                    'outtmpl': f'{download_path}/%(playlist_index)s_%(title).80s_%(id)s.%(ext)s',
+                    'ignoreerrors': True,
+                    'progress_hooks': [progress_hook],
+                }
+
+            # =========================
+            # 🎵 AUDIO MODE (MP3 จริง)
+            # =========================
+            else:
+                ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'ffmpeg_location': ffmpeg_path,
+                    'outtmpl': f'{download_path}/%(playlist_index)s_%(title).80s_%(id)s.%(ext)s',
+                    'ignoreerrors': True,
+                    'progress_hooks': [progress_hook],
+
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                }
+
+            # 🔥 ดาวน์โหลด
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([playlist_url])
+
+            status.text("✅ ดาวน์โหลดเสร็จแล้ว")
+            progress.progress(90)
+
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.stop()
+
+        # =========================
+        # 📦 ZIP FILE
+        # =========================
+        zip_path = os.path.join(download_path, "playlist.zip")
+
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for file in os.listdir(download_path):
+                file_path = os.path.join(download_path, file)
+
+                if file_path != zip_path:
+                    zipf.write(file_path, file)
+
+        # 🔥 ลบไฟล์ทั้งหมด เหลือแค่ ZIP
+        for file in os.listdir(download_path):
+            file_path = os.path.join(download_path, file)
+
+            if file_path != zip_path:
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except:
+                    pass
+
+        progress.progress(100)
+        status.text("📦 สร้าง ZIP และลบไฟล์เรียบร้อย!")
+
+        # =========================
+        # ⬇️ DOWNLOAD BUTTON
+        # =========================
+        with open(zip_path, "rb") as f:
+            st.download_button(
+                label="⬇️ ดาวน์โหลด ZIP",
+                data=f,
+                file_name="playlist.zip",
+                mime="application/zip"
+            )
+
+        st.success("🎉 เสร็จสมบูรณ์!")
